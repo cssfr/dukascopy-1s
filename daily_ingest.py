@@ -145,7 +145,7 @@ def ingest_symbol(symbol_key: str, start_override: date | None, end_date: date):
             run_dukascopy(dukas_id, date_str)
             time.sleep(1)  # polite
 
-            csv_name = f"{dukas_id}-m1-bid-{date_str}-{next_day_str}.csv"
+            csv_name = f"{dukas_id}-s1-bid-{date_str}-{next_day_str}.csv"
             csv_path = DOWNLOAD_DIR / csv_name
             if not csv_path.exists():
                 print(f"[{symbol_key}] CSV {csv_name} not found, skipping.")
