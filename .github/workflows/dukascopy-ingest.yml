@@ -47,10 +47,30 @@ jobs:
               python daily_ingest.py --symbols $SYMBOL
             fi
           done
+      # - name: Sync new parquet to MinIO
+      #   run: |
+      #     if [ -d ohlcv/1s ] && [ "$(find ohlcv/1s -name '*.parquet' 2>/dev/null | wc -l)" -gt 0 ]; then
+      #       echo "Found parquet files to sync"
+      #       mc mirror --overwrite ohlcv/1s/ myminio/dukascopy-node/ohlcv/1s/
+      #     else
+      #       echo "No new parquet files to sync - all symbols up-to-date"
+      #     fi
       - name: Sync new parquet to MinIO
         run: |
           if [ -d ohlcv/1s ] && [ "$(find ohlcv/1s -name '*.parquet' 2>/dev/null | wc -l)" -gt 0 ]; then
             echo "Found parquet files to sync"
+            
+            # Debug: Check connection
+            echo "Testing connection..."
+            mc ls myminio/dukascopy-node/ || exit 1
+            
+            # Debug: Check if destination exists
+            echo "Checking destination path..."
+            mc ls myminio/dukascopy-node/ohlcv/ || exit 1
+            mc ls myminio/dukascopy-node/ohlcv/1s/ || echo "1s path empty or doesn't exist yet"
+            
+            # Try mirror
+            echo "Starting mirror..."
             mc mirror --overwrite ohlcv/1s/ myminio/dukascopy-node/ohlcv/1s/
           else
             echo "No new parquet files to sync - all symbols up-to-date"
