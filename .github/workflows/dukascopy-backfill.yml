@@ -28,6 +28,6 @@ jobs:
 
       - name: Upload backfilled parquet
         run: |
-          if [ -d ohlcv/1m ]; then
+          if [ -d ohlcv/1s ]; then
             mc mirror --overwrite ohlcv/1s/ myminio/dukascopy-node/ohlcv/1s/
           fi
