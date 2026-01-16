@@ -147,8 +147,8 @@ def ingest_symbol(symbol_key: str, start_override: date | None, end_date: date):
 
             csv_name = f"{dukas_id}-s1-bid-{date_str}-{next_day_str}.csv"
             csv_path = DOWNLOAD_DIR / csv_name
-            if not csv_path.exists():
-                print(f"[{symbol_key}] CSV {csv_name} not found, skipping.")
+            if not csv_path.exists() or csv_path.stat().st_size == 0:
+                print(f"[{symbol_key}] CSV {csv_name} not found or empty (weekend/holiday), skipping.")
                 continue
 
             parquet_path.parent.mkdir(parents=True, exist_ok=True)
