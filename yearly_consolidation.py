@@ -91,7 +91,7 @@ def smart_download_for_symbol(symbol: str) -> None:
         while current_date <= end_date:
             date_str = current_date.strftime("%Y-%m-%d")
             src_path = f"myminio/dukascopy-node/ohlcv/1s/symbol={symbol}/date={date_str}/{symbol}_{date_str}.parquet"
-            dst_dir = f"ohlcv/1m/symbol={symbol}/date={date_str}"
+            dst_dir = f"ohlcv/1s/symbol={symbol}/date={date_str}"
             
             # Check if file exists and copy it
             check_cmd = ["mc", "stat", src_path]
