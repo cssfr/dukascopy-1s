@@ -94,7 +94,7 @@ def ingest_symbol_backfill(symbol_key: str, earliest_required: date, earliest_av
 
         try:
             run_dukascopy(dukas_id, date_str)
-            csv_name = f"{dukas_id}-m1-bid-{date_str}-{next_day_str}.csv"
+            csv_name = f"{dukas_id}-s1-bid-{date_str}-{next_day_str}.csv"
             csv_path = DOWNLOAD_DIR / csv_name
             if csv_path.exists():
                 parquet_path.parent.mkdir(parents=True, exist_ok=True)
