@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Historical yearly consolidation script for backfilled data.
-Consolidates daily 1m files into yearly files from earliest date until previous year (2024).
+Consolidates daily 1s files into yearly files from earliest date until previous year (2024).
 Uses EXACTLY the same logic as yearly_consolidation.py but processes historical years.
 Designed to be run manually once for backfilled historical data.
 """
@@ -16,8 +16,8 @@ from pathlib import Path
 import yaml
 
 # ─── CONFIG ───────────────────────────────────────────────────────
-SRC_BASE = Path("ohlcv/1m")      # Downloaded daily files
-DST_BASE = Path("ohlcv/1Y")      # Yearly consolidation output
+SRC_BASE = Path("ohlcv/1s")      # Downloaded daily files
+DST_BASE = Path("ohlcv/1Ys")      # Yearly consolidation output
 SYMBOLS_FILE = Path("symbols.yaml")
 CURRENT_YEAR = datetime.now().year
 PREVIOUS_YEAR = CURRENT_YEAR - 1  # 2024
@@ -77,8 +77,8 @@ def smart_download_for_symbol(symbol: str, target_year: int) -> None:
         cmd = [
             "mc", "mirror",
             "--exclude", "*",
-            "myminio/dukascopy-node/ohlcv/1m/",
-            "ohlcv/1m/"
+            "myminio/dukascopy-node/ohlcv/1s/",
+            "ohlcv/1s/"
         ]
         
         # Add specific include pattern using multiple excludes (workaround)
@@ -93,8 +93,8 @@ def smart_download_for_symbol(symbol: str, target_year: int) -> None:
         
         while current_date <= end_date:
             date_str = current_date.strftime("%Y-%m-%d")
-            src_path = f"myminio/dukascopy-node/ohlcv/1m/symbol={symbol}/date={date_str}/{symbol}_{date_str}.parquet"
-            dst_dir = f"ohlcv/1m/symbol={symbol}/date={date_str}"
+            src_path = f"myminio/dukascopy-node/ohlcv/1s/symbol={symbol}/date={date_str}/{symbol}_{date_str}.parquet"
+            dst_dir = f"ohlcv/1s/symbol={symbol}/date={date_str}"
             
             # Check if file exists and copy it
             check_cmd = ["mc", "stat", src_path]
@@ -254,8 +254,8 @@ def get_available_years_for_symbol(symbol: str) -> list[int]:
     """Scan MinIO bucket to discover what years are actually available for this symbol"""
     print(f"[{symbol}] Scanning MinIO bucket for available years...")
     
-    # Path pattern: ohlcv/1m/symbol=SYMBOL/
-    path_pattern = f"myminio/dukascopy-node/ohlcv/1m/symbol={symbol}/"
+    # Path pattern: ohlcv/1s/symbol=SYMBOL/
+    path_pattern = f"myminio/dukascopy-node/ohlcv/1s/symbol={symbol}/"
     
     # Get list of date directories
     dates_output = run_mc_command(f"mc ls {path_pattern}")

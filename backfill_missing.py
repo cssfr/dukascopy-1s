@@ -8,7 +8,7 @@ import pandas as pd
 import json
 import numpy as np
 
-OUTPUT_DIR = Path("ohlcv/1m")
+OUTPUT_DIR = Path("ohlcv/1s")
 DOWNLOAD_DIR = Path("download")
 SYMBOLS_FILE = Path("symbols.yaml")
 
@@ -47,7 +47,7 @@ def run_dukascopy(symbol_id: str, date_str: str):
         "-i", symbol_id,
         "-from", date_str,
         "-to", (datetime.fromisoformat(date_str) + timedelta(days=1)).strftime("%Y-%m-%d"),
-        "-t", "m1",
+        "-t", "s1",
         "-f", "csv",
         '--date-format \"YYYY-MM-DD HH:mm\"',
         "-v",
@@ -58,7 +58,7 @@ def run_dukascopy(symbol_id: str, date_str: str):
 def list_parquet_dates_remote(symbol_key: str):
     # List remote objects and parse dates with new structure
     proc = subprocess.run(
-        ["mc", "ls", "--json", f"myminio/dukascopy-node/ohlcv/1m/symbol={symbol_key}/"],
+        ["mc", "ls", "--json", f"myminio/dukascopy-node/ohlcv/1s/symbol={symbol_key}/"],
         capture_output=True, text=True, check=True
     )
     dates = []
@@ -85,7 +85,7 @@ def ingest_symbol_backfill(symbol_key: str, earliest_required: date, earliest_av
         date_str = current.strftime("%Y-%m-%d")
         next_day_str = (current + timedelta(days=1)).strftime("%Y-%m-%d")
         
-        # New path structure: ohlcv/1m/symbol=BTC/date=2017-05-08/BTC_2017-05-08.parquet
+        # New path structure: ohlcv/1s/symbol=BTC/date=2017-05-08/BTC_2017-05-08.parquet
         parquet_path = OUTPUT_DIR / f"symbol={symbol_key}" / f"date={date_str}" / f"{symbol_key}_{date_str}.parquet"
 
         if parquet_path.exists():

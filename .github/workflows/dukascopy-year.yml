@@ -1,7 +1,7 @@
 name: Dukascopy Yearly Consolidation
 on:
   workflow_run:
-    workflows: ["Dukascopy gap-fill 1m"]  # Must match exactly the name in dukascopy-ingest.yml
+    workflows: ["Dukascopy gap-fill 1s"]  # Must match exactly the name in dukascopy-ingest.yml
     types: [completed]
     branches: [main]
   workflow_dispatch:  # Keep manual trigger for testing
@@ -38,14 +38,14 @@ jobs:
           
           # Step 1: Download existing yearly files for current year only
           SYMS=$(yq 'keys | .[]' symbols.yaml | tr -d '"')
-          mkdir -p ohlcv/1Y
+          mkdir -p ohlcv/1Ys
           
           for SYMBOL in $SYMS; do
             # Check if yearly file exists for this symbol and current year
-            YEARLY_PATH="myminio/dukascopy-node/ohlcv/1Y/symbol=$SYMBOL/year=$CURRENT_YEAR/${SYMBOL}_${CURRENT_YEAR}.parquet"
+            YEARLY_PATH="myminio/dukascopy-node/ohlcv/1Ys/symbol=$SYMBOL/year=$CURRENT_YEAR/${SYMBOL}_${CURRENT_YEAR}.parquet"
             if mc stat "$YEARLY_PATH" >/dev/null 2>&1; then
               echo "[INFO] Downloading existing yearly file for $SYMBOL"
-              LOCAL_DIR="ohlcv/1Y/symbol=$SYMBOL/year=$CURRENT_YEAR"
+              LOCAL_DIR="ohlcv/1Ys/symbol=$SYMBOL/year=$CURRENT_YEAR"
               mkdir -p "$LOCAL_DIR"
               mc cp "$YEARLY_PATH" "$LOCAL_DIR/"
             else
@@ -66,9 +66,9 @@ jobs:
       
       - name: Upload updated yearly files
         run: |
-          if [ -d ohlcv/1Y ]; then
+          if [ -d ohlcv/1Ys ]; then
             echo "Uploading updated yearly files to MinIO"
-            mc mirror --overwrite ohlcv/1Y/ myminio/dukascopy-node/ohlcv/1Y/
+            mc mirror --overwrite ohlcv/1Ys/ myminio/dukascopy-node/ohlcv/1Ys/
           else
             echo "No yearly files to upload"
           fi

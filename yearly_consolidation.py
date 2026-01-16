@@ -14,8 +14,8 @@ from pathlib import Path
 import yaml
 
 # ─── CONFIG ───────────────────────────────────────────────────────
-SRC_BASE = Path("ohlcv/1m")      # Downloaded daily files
-DST_BASE = Path("ohlcv/1Y")      # Yearly consolidation output
+SRC_BASE = Path("ohlcv/1s")      # Downloaded daily files
+DST_BASE = Path("ohlcv/1Ys")      # Yearly consolidation output
 SYMBOLS_FILE = Path("symbols.yaml")
 CURRENT_YEAR = datetime.now().year
 # ─────────────────────────────────────────────────────────────────
@@ -74,8 +74,8 @@ def smart_download_for_symbol(symbol: str) -> None:
         cmd = [
             "mc", "mirror",
             "--exclude", "*",
-            "myminio/dukascopy-node/ohlcv/1m/",
-            "ohlcv/1m/"
+            "myminio/dukascopy-node/ohlcv/1s/",
+            "ohlcv/1s/"
         ]
         
         # Add specific include pattern using multiple excludes (workaround)
@@ -90,7 +90,7 @@ def smart_download_for_symbol(symbol: str) -> None:
         
         while current_date <= end_date:
             date_str = current_date.strftime("%Y-%m-%d")
-            src_path = f"myminio/dukascopy-node/ohlcv/1m/symbol={symbol}/date={date_str}/{symbol}_{date_str}.parquet"
+            src_path = f"myminio/dukascopy-node/ohlcv/1s/symbol={symbol}/date={date_str}/{symbol}_{date_str}.parquet"
             dst_dir = f"ohlcv/1m/symbol={symbol}/date={date_str}"
             
             # Check if file exists and copy it

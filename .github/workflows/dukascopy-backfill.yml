@@ -1,4 +1,4 @@
-name: Dukascopy Backfill 1m
+name: Dukascopy Backfill 1s
 
 on:
   workflow_dispatch:
@@ -29,5 +29,5 @@ jobs:
       - name: Upload backfilled parquet
         run: |
           if [ -d ohlcv/1m ]; then
-            mc mirror --overwrite ohlcv/1m/ myminio/dukascopy-node/ohlcv/1m/
+            mc mirror --overwrite ohlcv/1s/ myminio/dukascopy-node/ohlcv/1s/
           fi

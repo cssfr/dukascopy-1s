@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Daily gap‑filling Dukascopy ingest utility.
 
-Reads existing parquet files in ./ohlcv/1m (synced from your MinIO bucket),
+Reads existing parquet files in ./ohlcv/1s (synced from your MinIO bucket),
 finds the newest date per symbol, and downloads any missing days up to
 yesterday UTC using dukascopy-node. Converts each day to Parquet with a
 unix_time column and saves it back into the same folder hierarchy.
@@ -25,7 +25,7 @@ import numpy as np
 # -----------------------------------------------------------------------------
 #  Paths & config
 # -----------------------------------------------------------------------------
-OUTPUT_DIR = Path("ohlcv/1m")      # local mirror of your bucket; sync before/after
+OUTPUT_DIR = Path("ohlcv/1s")      # local mirror of your bucket; sync before/after
 DOWNLOAD_DIR = Path("download")    # transient CSVs
 SYMBOLS_FILE = Path("symbols.yaml")
 
@@ -77,7 +77,7 @@ def run_dukascopy(symbol_id: str, date_str: str):
     next_day = (datetime.fromisoformat(date_str) + timedelta(days=1)).strftime("%Y-%m-%d")
     cmd = (
         f"npx dukascopy-node -i {symbol_id} -from {date_str} -to {next_day} "
-        f"-t m1 -f csv --date-format \"YYYY-MM-DD HH:mm\" -v -fl"
+        f"-t s1 -f csv --date-format \"YYYY-MM-DD HH:mm\" -v -fl"
     )
     print("Running:", cmd)
     subprocess.run(cmd, check=True, shell=True)
@@ -134,7 +134,7 @@ def ingest_symbol(symbol_key: str, start_override: date | None, end_date: date):
         date_str = day.strftime("%Y-%m-%d")
         next_day_str = (day + timedelta(days=1)).strftime("%Y-%m-%d")
         
-        # New path structure: ohlcv/1m/symbol=BTC/date=2017-05-08/BTC_2017-05-08.parquet
+        # New path structure: ohlcv/1s/symbol=BTC/date=2017-05-08/BTC_2017-05-08.parquet
         parquet_path = OUTPUT_DIR / f"symbol={symbol_key}" / f"date={date_str}" / f"{symbol_key}_{date_str}.parquet"
 
         if parquet_path.exists():

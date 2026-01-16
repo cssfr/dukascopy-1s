@@ -26,10 +26,10 @@ def get_latest_date_for_symbol(symbol: str) -> Optional[str]:
     Download and read the parquet file to get exact latest date
     Returns date in YYYY-MM-DD format or None if no data found
     """
-    print(f"Scanning latest 1Y data for {symbol} (accurate method)")
+    print(f"Scanning latest 1Ys data for {symbol} (accurate method)")
     
-    # Path pattern: ohlcv/1Y/symbol=SYMBOL/
-    path_pattern = f"myminio/dukascopy-node/ohlcv/1Y/symbol={symbol}/"
+    # Path pattern: ohlcv/1Ys/symbol=SYMBOL/
+    path_pattern = f"myminio/dukascopy-node/ohlcv/1Ys/symbol={symbol}/"
     
     # Get list of year directories
     years_output = run_mc_command(f"mc ls {path_pattern}")
@@ -174,10 +174,10 @@ def update_instruments_metadata():
             if "sources" not in instrument_data["dataRange"]:
                 instrument_data["dataRange"]["sources"] = {}
             
-            if "1Y" not in instrument_data["dataRange"]["sources"]:
-                instrument_data["dataRange"]["sources"]["1Y"] = {}
+            if "1Ys" not in instrument_data["dataRange"]["sources"]:
+                instrument_data["dataRange"]["sources"]["1Ys"] = {}
             
-            instrument_data["dataRange"]["sources"]["1Y"]["latest"] = latest_date
+            instrument_data["dataRange"]["sources"]["1Ys"]["latest"] = latest_date
             
             print(f"Updated {symbol} latest date to: {latest_date}")
         else:

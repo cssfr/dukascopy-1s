@@ -50,9 +50,9 @@ jobs:
       
       - name: Upload consolidated yearly files to MinIO
         run: |
-          if [ -d "ohlcv/1Y" ]; then
+          if [ -d "ohlcv/1Ys" ]; then
             echo "Uploading consolidated yearly files to MinIO..."
-            mc mirror ohlcv/1Y/ myminio/dukascopy-node/ohlcv/1Y/ --overwrite
+            mc mirror ohlcv/1Ys/ myminio/dukascopy-node/ohlcv/1Ys/ --overwrite
             echo "Upload completed"
           else
             echo "No yearly files to upload"
