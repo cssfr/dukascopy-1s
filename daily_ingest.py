@@ -55,7 +55,7 @@ def convert_to_parquet(input_csv_path: Path, output_parquet_path: Path, symbol: 
             df[col] = df[col].astype(dtype)
 
     # Ensure UTC, independent of machine timezone
-    df['timestamp'] = pd.to_datetime(df['timestamp'], format='%Y-%m-%d %H:%M', utc=True)
+    df['timestamp'] = pd.to_datetime(df['timestamp'], format='%Y-%m-%d %H:%M:%S', utc=True)
 
     # Add unix epoch seconds
     df['unix_time'] = df['timestamp'].astype(np.int64) // 10**9
