@@ -49,7 +49,7 @@ def run_dukascopy(symbol_id: str, date_str: str):
         "-to", (datetime.fromisoformat(date_str) + timedelta(days=1)).strftime("%Y-%m-%d"),
         "-t", "s1",
         "-f", "csv",
-        '--date-format \"YYYY-MM-DD HH:mm\"',
+        '--date-format \"YYYY-MM-DD HH:mm:ss\"',
         "-v",
         "-fl",
     ]

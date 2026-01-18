@@ -77,7 +77,7 @@ def run_dukascopy(symbol_id: str, date_str: str):
     next_day = (datetime.fromisoformat(date_str) + timedelta(days=1)).strftime("%Y-%m-%d")
     cmd = (
         f"npx dukascopy-node -i {symbol_id} -from {date_str} -to {next_day} "
-        f"-t s1 -f csv --date-format \"YYYY-MM-DD HH:mm\" -v -fl"
+        f"-t s1 -f csv --date-format \"YYYY-MM-DD HH:mm:ss\" -v -fl"
     )
     print("Running:", cmd)
     subprocess.run(cmd, check=True, shell=True)
