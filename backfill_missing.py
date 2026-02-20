@@ -33,7 +33,7 @@ def convert_to_parquet(input_csv_path: Path, output_parquet_path: Path, symbol: 
     
     # Ensure UTC, independent of machine timezone
     df['timestamp'] = pd.to_datetime(df['timestamp'], format='%Y-%m-%d %H:%M:%S', utc=True)
-    df['unix_time'] = df['timestamp'].astype(np.int64) // 10**9
+    df['unix_time'] = (df['timestamp'] - pd.Timestamp('1970-01-01', tz='UTC')).dt.total_seconds().astype(np.int64)
     
     df.insert(0, 'symbol', symbol)
     cols = df.columns.tolist()
