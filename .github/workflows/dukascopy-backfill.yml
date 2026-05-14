@@ -2,10 +2,25 @@ name: Dukascopy Backfill 1s
 
 on:
   workflow_dispatch:
+    inputs:
+      start_date:
+        description: 'Start date YYYY-MM-DD (leave blank to auto-detect earliest gap)'
+        required: false
+        default: ''
+      end_date:
+        description: 'End date YYYY-MM-DD (leave blank to auto-detect earliest gap)'
+        required: false
+        default: ''
+      symbols:
+        description: 'Comma-separated symbols e.g. NQ,ES (leave blank for all)'
+        required: false
+        default: ''
 
 jobs:
   backfill:
     runs-on: ubuntu-latest
+    permissions:
+      actions: write
 
     env:
       MINIO_ENDPOINT: ${{ secrets.MINIO_ENDPOINT }}
@@ -17,17 +32,48 @@ jobs:
 
       - name: Install tools
         run: |
+          set -euo pipefail
           pip install pandas pyarrow pyyaml
           npm install -g dukascopy-node
-          curl -s https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc
+
+          # Robust mc install: GitHub releases primary, dl.min.io fallback
+          MC_VERSION=$(curl -fsSL https://api.github.com/repos/minio/mc/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
+          if curl -fsSL "https://github.com/minio/mc/releases/download/${MC_VERSION}/mc.linux-amd64" -o /usr/local/bin/mc; then
+            echo "mc installed from GitHub releases (${MC_VERSION})"
+          else
+            echo "GitHub releases failed, trying dl.min.io fallback"
+            curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc
+          fi
           chmod +x /usr/local/bin/mc
+          mc --version
+
           mc alias set myminio "$MINIO_ENDPOINT" "$MINIO_KEY" "$MINIO_SECRET"
 
-      - name: Run backlog script
-        run: python backfill_missing.py
-
-      - name: Upload backfilled parquet
+      - name: Run backfill script
         run: |
-          if [ -d ohlcv/1s ]; then
-            mc mirror --overwrite ohlcv/1s/ myminio/dukascopy-node/ohlcv/1s/
+          set -euo pipefail
+          ARGS=""
+          if [[ -n "${{ inputs.start_date }}" && -n "${{ inputs.end_date }}" ]]; then
+            ARGS="--start-date ${{ inputs.start_date }} --end-date ${{ inputs.end_date }}"
           fi
+          if [[ -n "${{ inputs.symbols }}" ]]; then
+            ARGS="$ARGS --symbols ${{ inputs.symbols }}"
+          fi
+          python backfill_missing.py $ARGS
+
+      - name: Upload backfilled parquet to MinIO
+        run: |
+          set -euo pipefail
+          if [ -d ohlcv/1s ]; then
+            mc mirror --preserve --overwrite ohlcv/1s/ myminio/dukascopy-node/ohlcv/1s/
+          else
+            echo "No files to upload"
+          fi
+
+      - name: Trigger year consolidation
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run dukascopy-year.yml \
+            --repo ${{ github.repository }} \
+            --ref ${{ github.ref_name }}
