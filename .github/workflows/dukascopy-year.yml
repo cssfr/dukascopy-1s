@@ -1,15 +1,14 @@
 name: Dukascopy Yearly Consolidation
 on:
   workflow_run:
-    workflows: ["Dukascopy gap-fill 1s"]  # Must match exactly the name in dukascopy-ingest.yml
+    workflows: ["Dukascopy gap-fill 1s"]
     types: [completed]
     branches: [main]
-  workflow_dispatch:  # Keep manual trigger for testing
+  workflow_dispatch:
 
 jobs:
   consolidate:
     runs-on: ubuntu-latest
-    # Run if daily ingest was successful OR if manually triggered
     if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
     env:
       MINIO_ENDPOINT: ${{ secrets.MINIO_ENDPOINT }}
@@ -17,31 +16,48 @@ jobs:
       MINIO_SECRET:    ${{ secrets.MINIO_SECRET }}
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Report trigger status
         run: |
           echo "Triggered by workflow: ${{ github.event.workflow_run.workflow_id }}"
           echo "Daily ingest status: ${{ github.event.workflow_run.conclusion }}"
           echo "Daily ingest run: ${{ github.event.workflow_run.html_url }}"
-      
+
       - name: Install tools and dependencies
         run: |
+          set -euo pipefail
           pip install polars pyarrow pyyaml yq
-          curl -s https://dl.min.io/client/mc/release/linux-amd64/mc \
-               -o /usr/local/bin/mc && chmod +x /usr/local/bin/mc
+
+          MC_PATH=/usr/local/bin/mc
+          MC_URL="https://github.com/minio/mc/releases/latest/download/mc-linux-amd64"
+
+          echo "Downloading mc from $MC_URL"
+          curl -fL --retry 3 --retry-delay 2 "$MC_URL" -o "$MC_PATH" \
+            || {
+              echo "[WARN] Primary download failed; attempting fallback to dl.min.io"
+              curl -fL --retry 3 --retry-delay 2 "https://dl.min.io/client/mc/release/linux-amd64/mc" -o "$MC_PATH"
+            }
+
+          chmod +x "$MC_PATH"
+
+          if ! "$MC_PATH" --version >/dev/null 2>&1 ; then
+            echo "[ERROR] mc binary invalid or not executable."
+            head -c 200 "$MC_PATH" || true
+            exit 1
+          fi
+
+          echo "[INFO] mc installed: $($MC_PATH --version)"
           mc alias set myminio "$MINIO_ENDPOINT" "$MINIO_KEY" "$MINIO_SECRET"
-      
+
       - name: Download existing yearly files and smart daily sync
         run: |
           CURRENT_YEAR=$(date +%Y)
           echo "Downloading existing yearly files for $CURRENT_YEAR"
-          
-          # Step 1: Download existing yearly files for current year only
+
           SYMS=$(yq 'keys | .[]' symbols.yaml | tr -d '"')
           mkdir -p ohlcv/1Ys
-          
+
           for SYMBOL in $SYMS; do
-            # Check if yearly file exists for this symbol and current year
             YEARLY_PATH="myminio/dukascopy-node/ohlcv/1Ys/symbol=$SYMBOL/year=$CURRENT_YEAR/${SYMBOL}_${CURRENT_YEAR}.parquet"
             if mc stat "$YEARLY_PATH" >/dev/null 2>&1; then
               echo "[INFO] Downloading existing yearly file for $SYMBOL"
@@ -52,18 +68,17 @@ jobs:
               echo "[INFO] No existing yearly file for $SYMBOL - will create new"
             fi
           done
-          
-          # Step 2: Smart download for each symbol
+
           for SYMBOL in $SYMS; do
             echo "[INFO] Smart downloading for $SYMBOL"
             python yearly_consolidation.py --download-only --symbol $SYMBOL
           done
-      
+
       - name: Run consolidation
         run: |
           echo "Running yearly consolidation"
           python yearly_consolidation.py --consolidate-only
-      
+
       - name: Upload updated yearly files
         run: |
           if [ -d ohlcv/1Ys ]; then
@@ -74,7 +89,6 @@ jobs:
           fi
 
   workflow-keepalive:
-    # if: github.event_name == 'schedule'
     if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
     runs-on: ubuntu-latest
     permissions:
