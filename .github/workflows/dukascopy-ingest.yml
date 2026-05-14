@@ -15,7 +15,7 @@ jobs:
       - name: Install Python + node + tools
         run: |
           set -euo pipefail
-          pip install pandas pyarrow pyyaml yq
+          pip install pandas pyarrow pyyaml yq polars
           npm install -g dukascopy-node
 
           MC_PATH=/usr/local/bin/mc
@@ -45,6 +45,17 @@ jobs:
           echo "[INFO] mc installed: $($MC_PATH --version)"
           mc alias set myminio "$MINIO_ENDPOINT" "$MINIO_KEY" "$MINIO_SECRET"
 
+      - name: Prefetch existing yearly parquets (for incremental consolidation)
+        run: |
+          set -euo pipefail
+          YEAR=$(date -u +%Y)
+          SYMS=$(yq 'keys | .[]' symbols.yaml | tr -d '"')
+          for SYMBOL in $SYMS; do
+            DST="ohlcv/1Ys/symbol=${SYMBOL}/year=${YEAR}/"
+            mkdir -p "$DST"
+            mc cp --recursive "myminio/dukascopy-node/ohlcv/1Ys/symbol=${SYMBOL}/year=${YEAR}/" "$DST" 2>/dev/null || true
+          done
+
       - name: Run daily_ingest.py (dynamic per-symbol range)
         run: |
           SYMS=$(yq 'keys | .[]' symbols.yaml | tr -d '"')
@@ -70,13 +81,30 @@ jobs:
             fi
           done
 
-      - name: Sync new parquet to MinIO
+      - name: Sync new daily parquets to MinIO
         run: |
           if [ -d ohlcv/1s ] && [ "$(find ohlcv/1s -name '*.parquet' 2>/dev/null | wc -l)" -gt 0 ]; then
             echo "Found parquet files to sync"
             mc mirror --overwrite ohlcv/1s/ myminio/dukascopy-node/ohlcv/1s/
           else
             echo "No new parquet files to sync - all symbols up-to-date"
+          fi
+
+      - name: Consolidate daily files into yearly parquets
+        run: |
+          if [ -d ohlcv/1s ] && [ "$(find ohlcv/1s -name '*.parquet' 2>/dev/null | wc -l)" -gt 0 ]; then
+            python yearly_consolidation.py --consolidate-only
+          else
+            echo "No daily files to consolidate"
+          fi
+
+      - name: Sync yearly parquets to MinIO
+        run: |
+          if [ -d ohlcv/1Ys ] && [ "$(find ohlcv/1Ys -name '*.parquet' 2>/dev/null | wc -l)" -gt 0 ]; then
+            echo "Found yearly parquet files to sync"
+            mc mirror --overwrite ohlcv/1Ys/ myminio/dukascopy-node/ohlcv/1Ys/
+          else
+            echo "No yearly parquets to sync"
           fi
 
   workflow-keepalive:
