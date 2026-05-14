@@ -1,0 +1,84 @@
+name: Weekly Gap Check 1s
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'  # Every Monday 06:00 UTC — after weekend, catches last week's gaps
+  workflow_dispatch:
+    inputs:
+      lookback_days:
+        description: 'How many days back to scan for gaps (default: 30)'
+        required: false
+        default: '30'
+      symbols:
+        description: 'Comma-separated symbols (leave blank for all)'
+        required: false
+        default: ''
+
+jobs:
+  gap-check:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+
+    env:
+      MINIO_ENDPOINT: ${{ secrets.MINIO_ENDPOINT }}
+      MINIO_KEY:       ${{ secrets.MINIO_KEY }}
+      MINIO_SECRET:    ${{ secrets.MINIO_SECRET }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          set -euo pipefail
+          pip install pandas pyarrow pyyaml
+          npm install -g dukascopy-node
+
+          MC_VERSION=$(curl -fsSL https://api.github.com/repos/minio/mc/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
+          if curl -fsSL "https://github.com/minio/mc/releases/download/${MC_VERSION}/mc.linux-amd64" -o /usr/local/bin/mc; then
+            echo "mc installed from GitHub releases (${MC_VERSION})"
+          else
+            echo "GitHub releases failed, trying dl.min.io fallback"
+            curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc
+          fi
+          chmod +x /usr/local/bin/mc
+          mc --version
+
+          mc alias set myminio "$MINIO_ENDPOINT" "$MINIO_KEY" "$MINIO_SECRET"
+
+      - name: Compute date range and scan for gaps
+        run: |
+          set -euo pipefail
+          LOOKBACK=${{ inputs.lookback_days || '30' }}
+          START_DATE=$(date -u -d "${LOOKBACK} days ago" +%Y-%m-%d)
+          END_DATE=$(date -u -d "yesterday" +%Y-%m-%d)
+          echo "Scanning for gaps from ${START_DATE} to ${END_DATE}"
+
+          ARGS="--start-date ${START_DATE} --end-date ${END_DATE}"
+          if [[ -n "${{ inputs.symbols }}" ]]; then
+            ARGS="${ARGS} --symbols ${{ inputs.symbols }}"
+          fi
+
+          python backfill_missing.py ${ARGS}
+
+      - name: Upload any recovered parquets to MinIO
+        run: |
+          set -euo pipefail
+          if [ -d ohlcv/1s ]; then
+            mc mirror --preserve --overwrite ohlcv/1s/ myminio/dukascopy-node/ohlcv/1s/
+          else
+            echo "No new files to upload"
+          fi
+
+      - name: Trigger year consolidation if new files were uploaded
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -d ohlcv/1s ] && [ -n "$(find ohlcv/1s -name '*.parquet' 2>/dev/null)" ]; then
+            echo "New parquets found — triggering year consolidation"
+            gh workflow run dukascopy-year.yml \
+              --repo ${{ github.repository }} \
+              --ref ${{ github.ref_name }}
+          else
+            echo "No new files — skipping year consolidation"
+          fi
