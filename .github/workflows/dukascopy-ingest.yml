@@ -92,13 +92,17 @@ jobs:
 
       - name: Consolidate daily files into yearly parquets
         run: |
-          if [ -d ohlcv/1s ] && [ "$(find ohlcv/1s -name '*.parquet' 2>/dev/null | wc -l)" -gt 0 ]; then
+          NEW_COUNT=$(find ohlcv/1s -name '*.parquet' 2>/dev/null | wc -l)
+          if [ "$NEW_COUNT" -gt 0 ]; then
             python yearly_consolidation.py --consolidate-only
+            echo "CONSOLIDATED=true" >> $GITHUB_ENV
           else
-            echo "No daily files to consolidate"
+            echo "No new daily files to consolidate"
+            echo "CONSOLIDATED=false" >> $GITHUB_ENV
           fi
 
       - name: Sync yearly parquets to MinIO
+        if: env.CONSOLIDATED == 'true'
         run: |
           if [ -d ohlcv/1Ys ] && [ "$(find ohlcv/1Ys -name '*.parquet' 2>/dev/null | wc -l)" -gt 0 ]; then
             echo "Found yearly parquet files to sync"
