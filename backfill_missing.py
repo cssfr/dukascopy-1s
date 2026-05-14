@@ -20,8 +20,22 @@ MAX_RETRIES = 3
 RETRY_DELAY = 30  # seconds between attempts
 
 
+class NoDataError(Exception):
+    """Empty/header-only CSV — weekend, holiday, or genuinely unavailable day."""
+
+
+class DownloadError(Exception):
+    """Dukascopy fetch failed after all retries — likely a real trading day."""
+
+
 def convert_to_parquet(input_csv_path: Path, output_parquet_path: Path, symbol: str):
-    df = pd.read_csv(str(input_csv_path))
+    try:
+        df = pd.read_csv(str(input_csv_path))
+    except (pd.errors.EmptyDataError, ValueError) as e:
+        raise NoDataError(str(e))
+
+    if df.empty:
+        raise NoDataError("No data rows in CSV")
 
     schema_mapping = {
         'open': np.float64,
@@ -61,7 +75,6 @@ def run_dukascopy(symbol_id: str, date_str: str):
 
 
 def _exists_in_minio(symbol_key: str, date_str: str) -> bool:
-    """Check if a parquet already exists in MinIO for this symbol/date."""
     result = subprocess.run(
         ["mc", "ls", f"myminio/dukascopy-node/ohlcv/1s/symbol={symbol_key}/date={date_str}/"],
         capture_output=True, text=True
@@ -87,8 +100,13 @@ def list_parquet_dates_remote(symbol_key: str):
     return dates
 
 
-def _download_one_day(symbol_key: str, dukas_id: str, current: date) -> bool:
-    """Download and convert one day with retries. Returns True if parquet was created."""
+def _download_one_day(symbol_key: str, dukas_id: str, current: date):
+    """Download and convert one day with retries.
+
+    Returns True if parquet was created.
+    Returns False if the day has no data (weekend/holiday) — not a failure.
+    Raises DownloadError if all retries exhausted on what looks like a real trading day.
+    """
     date_str = current.strftime("%Y-%m-%d")
     next_day_str = (current + timedelta(days=1)).strftime("%Y-%m-%d")
 
@@ -98,30 +116,39 @@ def _download_one_day(symbol_key: str, dukas_id: str, current: date) -> bool:
         print(f"[{symbol_key}] Already exists locally: {date_str}")
         return True
 
+    last_exc = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             run_dukascopy(dukas_id, date_str)
-            csv_name = f"{dukas_id}-s1-bid-{date_str}-{next_day_str}.csv"
-            csv_path = DOWNLOAD_DIR / csv_name
-            if csv_path.exists() and csv_path.stat().st_size > 0:
-                parquet_path.parent.mkdir(parents=True, exist_ok=True)
-                convert_to_parquet(csv_path, parquet_path, symbol_key)
-                csv_path.unlink(missing_ok=True)
-                print(f"[{symbol_key}] ✔ {date_str}")
-                return True
-            else:
-                csv_path.unlink(missing_ok=True)
-                print(f"[{symbol_key}] ⚠ {date_str} — no data (holiday/weekend/unavailable)")
-                return False
         except Exception as e:
+            last_exc = e
             if attempt < MAX_RETRIES:
-                print(f"[{symbol_key}] ✗ {date_str} attempt {attempt}/{MAX_RETRIES} failed: {e} — retrying in {RETRY_DELAY}s")
+                print(f"[{symbol_key}] ✗ {date_str} attempt {attempt}/{MAX_RETRIES}: {e} — retrying in {RETRY_DELAY}s")
                 time.sleep(RETRY_DELAY)
+                continue
             else:
                 print(f"[{symbol_key}] ✗ {date_str} — all {MAX_RETRIES} attempts failed: {e}")
-                return False
+                raise DownloadError(str(e)) from e
 
-    return False
+        csv_name = f"{dukas_id}-s1-bid-{date_str}-{next_day_str}.csv"
+        csv_path = DOWNLOAD_DIR / csv_name
+
+        if not csv_path.exists() or csv_path.stat().st_size == 0:
+            csv_path.unlink(missing_ok=True)
+            print(f"[{symbol_key}] ⚠ {date_str} — no data (holiday/weekend/unavailable)")
+            return False
+
+        parquet_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            convert_to_parquet(csv_path, parquet_path, symbol_key)
+        except NoDataError:
+            csv_path.unlink(missing_ok=True)
+            print(f"[{symbol_key}] ⚠ {date_str} — no data rows (holiday/weekend/unavailable)")
+            return False
+
+        csv_path.unlink(missing_ok=True)
+        print(f"[{symbol_key}] ✔ {date_str}")
+        return True
 
 
 def _group_into_ranges(dates: list) -> list:
@@ -143,7 +170,7 @@ def _group_into_ranges(dates: list) -> list:
 
 def ingest_date_range(symbol_key: str, start_date: date, end_date: date) -> list:
     """Fill an arbitrary date range, skipping dates already in MinIO.
-    Returns list of dates that failed (no parquet created after all retries)."""
+    Returns list of dates that failed after all retries (real trading days, not weekends)."""
     meta = SYMBOLS[symbol_key]
     dukas_id = meta["id"]
     DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -158,11 +185,11 @@ def ingest_date_range(symbol_key: str, start_date: date, end_date: date) -> list
             current += timedelta(days=1)
             continue
 
-        ok = _download_one_day(symbol_key, dukas_id, current)
-        if not ok:
-            parquet_path = OUTPUT_DIR / f"symbol={symbol_key}" / f"date={date_str}" / f"{symbol_key}_{date_str}.parquet"
-            if not parquet_path.exists():
-                failed.append(date_str)
+        try:
+            _download_one_day(symbol_key, dukas_id, current)
+        except DownloadError:
+            failed.append(date_str)
+
         current += timedelta(days=1)
     return failed
 
@@ -176,11 +203,10 @@ def ingest_symbol_backfill(symbol_key: str, earliest_required: date, earliest_av
     current = earliest_required
     while current < earliest_available:
         date_str = current.strftime("%Y-%m-%d")
-        ok = _download_one_day(symbol_key, dukas_id, current)
-        if not ok:
-            parquet_path = OUTPUT_DIR / f"symbol={symbol_key}" / f"date={date_str}" / f"{symbol_key}_{date_str}.parquet"
-            if not parquet_path.exists():
-                failed.append(date_str)
+        try:
+            _download_one_day(symbol_key, dukas_id, current)
+        except DownloadError:
+            failed.append(date_str)
         current += timedelta(days=1)
     return failed
 
