@@ -29,6 +29,10 @@ OUTPUT_DIR = Path("ohlcv/1s")      # local mirror of your bucket; sync before/af
 DOWNLOAD_DIR = Path("download")    # transient CSVs
 SYMBOLS_FILE = Path("symbols.yaml")
 
+# Per-day download timeout in seconds.  1s data requires downloading 24 hourly
+# tick files from Dukascopy's CDN and aggregating — allow up to 5 minutes.
+DUKASCOPY_TIMEOUT = 300
+
 if not SYMBOLS_FILE.exists():
     raise SystemExit("symbols.yaml not found. Commit it alongside this script.")
 
@@ -43,12 +47,12 @@ def convert_to_parquet(input_csv_path: Path, output_parquet_path: Path, symbol: 
     # Define expected schema for comprehensive casting using numpy types
     schema_mapping = {
         'open': np.float64,
-        'high': np.float64, 
+        'high': np.float64,
         'low': np.float64,
         'close': np.float64,
         'volume': np.float64
     }
-    
+
     # Apply schema casting for all expected columns
     for col, dtype in schema_mapping.items():
         if col in df.columns:
@@ -71,16 +75,21 @@ def convert_to_parquet(input_csv_path: Path, output_parquet_path: Path, symbol: 
     df.to_parquet(str(output_parquet_path), index=False)
 
 # -----------------------------------------------------------------------------
-#  Downloader (verbatim signature)
+#  Downloader
 # -----------------------------------------------------------------------------
 def run_dukascopy(symbol_id: str, date_str: str):
+    """Run dukascopy-node for one day of 1s data.
+
+    Raises subprocess.CalledProcessError on non-zero exit.
+    Raises subprocess.TimeoutExpired if the download stalls past DUKASCOPY_TIMEOUT.
+    """
     next_day = (datetime.fromisoformat(date_str) + timedelta(days=1)).strftime("%Y-%m-%d")
     cmd = (
         f"npx dukascopy-node -i {symbol_id} -from {date_str} -to {next_day} "
         f"-t s1 -f csv --date-format \"YYYY-MM-DD HH:mm:ss\" -v -fl"
     )
     print("Running:", cmd)
-    subprocess.run(cmd, check=True, shell=True)
+    subprocess.run(cmd, check=True, shell=True, timeout=DUKASCOPY_TIMEOUT)
 
 # -----------------------------------------------------------------------------
 #  Helper – latest ingested day with new structure
@@ -90,7 +99,7 @@ def newest_parquet_date(symbol_key: str) -> date | None:
     if not folder.exists():
         return None
     dates: list[date] = []
-    
+
     # Look for date directories in new structure: date=YYYY-MM-DD/
     for date_dir in folder.glob("date=*"):
         if date_dir.is_dir():
@@ -133,8 +142,8 @@ def ingest_symbol(symbol_key: str, start_override: date | None, end_date: date):
     for day in daterange(start_date, end_date):
         date_str = day.strftime("%Y-%m-%d")
         next_day_str = (day + timedelta(days=1)).strftime("%Y-%m-%d")
-        
-        # New path structure: ohlcv/1s/symbol=BTC/date=2017-05-08/BTC_2017-05-08.parquet
+
+        # New path structure: ohlcv/1s/symbol=NQ/date=2024-03-15/NQ_2024-03-15.parquet
         parquet_path = OUTPUT_DIR / f"symbol={symbol_key}" / f"date={date_str}" / f"{symbol_key}_{date_str}.parquet"
 
         if parquet_path.exists():
@@ -148,15 +157,17 @@ def ingest_symbol(symbol_key: str, start_override: date | None, end_date: date):
             csv_name = f"{dukas_id}-s1-bid-{date_str}-{next_day_str}.csv"
             csv_path = DOWNLOAD_DIR / csv_name
             if not csv_path.exists() or csv_path.stat().st_size == 0:
-                print(f"[{symbol_key}] CSV {csv_name} not found or empty (weekend/holiday), skipping.")
+                print(f"[{symbol_key}] {date_str}: CSV not found or empty — Dukascopy returned no 1s data (holiday/weekend/unavailable).")
                 continue
 
             parquet_path.parent.mkdir(parents=True, exist_ok=True)
             convert_to_parquet(csv_path, parquet_path, symbol_key)
             print(f"[{symbol_key}] saved {parquet_path.relative_to(OUTPUT_DIR)}")
-            # csv_path.unlink(missing_ok=True)  # uncomment to auto‑delete
+            csv_path.unlink(missing_ok=True)
+        except subprocess.TimeoutExpired:
+            print(f"[{symbol_key}] {date_str}: dukascopy-node timed out after {DUKASCOPY_TIMEOUT}s — skipping.")
         except subprocess.CalledProcessError as e:
-            print(f"[{symbol_key}] dukascopy-node failed on {date_str}: {e}")
+            print(f"[{symbol_key}] {date_str}: dukascopy-node exited with error: {e}")
 
 # -----------------------------------------------------------------------------
 #  CLI
