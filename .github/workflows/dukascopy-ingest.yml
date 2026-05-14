@@ -14,63 +14,66 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Python + node + tools
         run: |
+          set -euo pipefail
           pip install pandas pyarrow pyyaml yq
           npm install -g dukascopy-node
-          curl -s https://dl.min.io/client/mc/release/linux-amd64/mc \
-               -o /usr/local/bin/mc && chmod +x /usr/local/bin/mc
-          mc alias set myminio "$MINIO_ENDPOINT" "$MINIO_KEY" "$MINIO_SECRET" --insecure
+
+          MC_PATH=/usr/local/bin/mc
+          MC_URL="https://github.com/minio/mc/releases/latest/download/mc-linux-amd64"
+
+          echo "Downloading mc from $MC_URL"
+          curl -fL --retry 3 --retry-delay 2 "$MC_URL" -o "$MC_PATH" \
+            || {
+              echo "[WARN] Primary download failed; attempting fallback to dl.min.io"
+              curl -fL --retry 3 --retry-delay 2 "https://dl.min.io/client/mc/release/linux-amd64/mc" -o "$MC_PATH"
+            }
+
+          chmod +x "$MC_PATH"
+
+          echo "[DEBUG] file output:"
+          file "$MC_PATH" || true
+
+          echo "[DEBUG] first 160 bytes (hexdump):"
+          head -c 160 "$MC_PATH" | hexdump -C | sed -n '1,6p' || true
+
+          if ! "$MC_PATH" --version >/dev/null 2>&1 ; then
+            echo "[ERROR] mc binary invalid or not executable. Dumping first 200 bytes:"
+            head -c 200 "$MC_PATH" || true
+            exit 1
+          fi
+
+          echo "[INFO] mc installed: $($MC_PATH --version)"
+          mc alias set myminio "$MINIO_ENDPOINT" "$MINIO_KEY" "$MINIO_SECRET"
+
       - name: Run daily_ingest.py (dynamic per-symbol range)
         run: |
-          # Read symbols from YAML (newline-safe)
           SYMS=$(yq 'keys | .[]' symbols.yaml | tr -d '"')
           for SYMBOL in $SYMS; do
-            # Get the newest date directory in MinIO for this symbol (new structure)
             LAST_DIR=$(mc ls --json myminio/dukascopy-node/ohlcv/1s/symbol=$SYMBOL/ \
               | jq -r 'select(.key | test("date=.*/$")) | .key' \
               | sort | tail -n1)
             if [[ -n "$LAST_DIR" ]]; then
-              # Extract date from "date=YYYY-MM-DD/"
               DATE=${LAST_DIR##*date=}
               DATE=${DATE%/}
-              # Verify the parquet file actually exists in that date directory
               PARQUET_FILE="myminio/dukascopy-node/ohlcv/1s/symbol=$SYMBOL/date=$DATE/${SYMBOL}_${DATE}.parquet"
               if mc stat "$PARQUET_FILE" >/dev/null 2>&1; then
                 NEXT_DATE=$(python -c "from datetime import date, timedelta; d = date.fromisoformat('$DATE'); print(d + timedelta(days=1))")
                 echo "[INFO] Ingesting $SYMBOL from $NEXT_DATE (last file: $DATE)"
                 python daily_ingest.py --symbols $SYMBOL --from $NEXT_DATE
               else
-                echo "[WARNING] Date directory exists but parquet file missing for $SYMBOL on $DATE → using default"
+                echo "[WARNING] Date directory exists but parquet file missing for $SYMBOL on $DATE"
                 python daily_ingest.py --symbols $SYMBOL
               fi
             else
-              echo "[INFO] No date directories found for $SYMBOL → using default from symbols.yaml"
+              echo "[INFO] No date directories found for $SYMBOL"
               python daily_ingest.py --symbols $SYMBOL
             fi
           done
-      # - name: Sync new parquet to MinIO
-      #   run: |
-      #     if [ -d ohlcv/1s ] && [ "$(find ohlcv/1s -name '*.parquet' 2>/dev/null | wc -l)" -gt 0 ]; then
-      #       echo "Found parquet files to sync"
-      #       mc mirror --overwrite ohlcv/1s/ myminio/dukascopy-node/ohlcv/1s/
-      #     else
-      #       echo "No new parquet files to sync - all symbols up-to-date"
-      #     fi
+
       - name: Sync new parquet to MinIO
         run: |
           if [ -d ohlcv/1s ] && [ "$(find ohlcv/1s -name '*.parquet' 2>/dev/null | wc -l)" -gt 0 ]; then
             echo "Found parquet files to sync"
-            
-            # Debug: Check connection
-            echo "Testing connection..."
-            mc ls myminio/dukascopy-node/ || exit 1
-            
-            # Debug: Check if destination exists
-            echo "Checking destination path..."
-            mc ls myminio/dukascopy-node/ohlcv/ || exit 1
-            mc ls myminio/dukascopy-node/ohlcv/1s/ || echo "1s path empty or doesn't exist yet"
-            
-            # Try mirror
-            echo "Starting mirror..."
             mc mirror --overwrite ohlcv/1s/ myminio/dukascopy-node/ohlcv/1s/
           else
             echo "No new parquet files to sync - all symbols up-to-date"
