@@ -60,6 +60,15 @@ def run_dukascopy(symbol_id: str, date_str: str):
     subprocess.run(" ".join(cmd), check=True, shell=True)
 
 
+def _exists_in_minio(symbol_key: str, date_str: str) -> bool:
+    """Check if a parquet already exists in MinIO for this symbol/date."""
+    result = subprocess.run(
+        ["mc", "ls", f"myminio/dukascopy-node/ohlcv/1s/symbol={symbol_key}/date={date_str}/"],
+        capture_output=True, text=True
+    )
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
 def list_parquet_dates_remote(symbol_key: str):
     proc = subprocess.run(
         ["mc", "ls", "--json", f"myminio/dukascopy-node/ohlcv/1s/symbol={symbol_key}/"],
@@ -133,7 +142,8 @@ def _group_into_ranges(dates: list) -> list:
 
 
 def ingest_date_range(symbol_key: str, start_date: date, end_date: date) -> list:
-    """Fill an arbitrary date range. Returns list of dates that failed (no parquet created)."""
+    """Fill an arbitrary date range, skipping dates already in MinIO.
+    Returns list of dates that failed (no parquet created after all retries)."""
     meta = SYMBOLS[symbol_key]
     dukas_id = meta["id"]
     DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -142,6 +152,12 @@ def ingest_date_range(symbol_key: str, start_date: date, end_date: date) -> list
     current = start_date
     while current <= end_date:
         date_str = current.strftime("%Y-%m-%d")
+
+        if _exists_in_minio(symbol_key, date_str):
+            print(f"[{symbol_key}] Already in MinIO: {date_str}")
+            current += timedelta(days=1)
+            continue
+
         ok = _download_one_day(symbol_key, dukas_id, current)
         if not ok:
             parquet_path = OUTPUT_DIR / f"symbol={symbol_key}" / f"date={date_str}" / f"{symbol_key}_{date_str}.parquet"
@@ -171,8 +187,8 @@ def ingest_symbol_backfill(symbol_key: str, earliest_required: date, earliest_av
 
 def main():
     parser = argparse.ArgumentParser(description="Backfill missing 1s OHLCV parquet files")
-    parser.add_argument("--start-date", help="Start date YYYY-MM-DD (inclusive) for explicit range fill")
-    parser.add_argument("--end-date", help="End date YYYY-MM-DD (inclusive) for explicit range fill")
+    parser.add_argument("--start-date", help="Start date YYYY-MM-DD (inclusive)")
+    parser.add_argument("--end-date", help="End date YYYY-MM-DD (inclusive)")
     parser.add_argument("--symbols", help="Comma-separated symbols e.g. NQ,ES (default: all in symbols.yaml)")
     args = parser.parse_args()
 
@@ -187,7 +203,7 @@ def main():
             if symbol not in SYMBOLS:
                 print(f"Unknown symbol: {symbol}")
                 continue
-            print(f"[{symbol}] Filling date range {start} to {end}")
+            print(f"[{symbol}] Scanning and filling {start} to {end} (skipping dates already in MinIO)")
             failed = ingest_date_range(symbol, start, end)
             if failed:
                 all_failed[symbol] = failed
@@ -224,7 +240,7 @@ def main():
                 )
         print("=" * 60)
     else:
-        print("\n✔ All dates downloaded successfully.")
+        print("\n✔ All dates processed successfully.")
 
 
 if __name__ == "__main__":
