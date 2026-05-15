@@ -233,15 +233,174 @@ def _mark_month_failed(symbol_key: str, year: int, month: int, attempt: int, err
 
 
 # -----------------------------------------------------------------------------
+#  Inline yearly consolidation — scoped to one (symbol, year)
+# -----------------------------------------------------------------------------
+YEARLY_BASE = Path("ohlcv/1Ys")
+
+YEARLY_SCHEMA_CASTS = [
+    pl.col("timestamp").cast(pl.Datetime("us", "UTC")),
+    pl.col("open").cast(pl.Float64),
+    pl.col("high").cast(pl.Float64),
+    pl.col("low").cast(pl.Float64),
+    pl.col("close").cast(pl.Float64),
+    pl.col("volume").cast(pl.Float64),
+]
+
+
+def _list_local_dailies_for_year(symbol_key: str, year: int) -> list[Path]:
+    folder = OUTPUT_DIR / f"symbol={symbol_key}"
+    if not folder.exists():
+        return []
+    out = []
+    for date_dir in folder.glob(f"date={year}-*"):
+        if not date_dir.is_dir():
+            continue
+        try:
+            date_str = date_dir.name.split("=")[1]
+            datetime.strptime(date_str, "%Y-%m-%d")  # validate
+        except (ValueError, IndexError):
+            continue
+        parquet = date_dir / f"{symbol_key}_{date_str}.parquet"
+        if parquet.exists():
+            out.append(parquet)
+    return sorted(out)
+
+
+def consolidate_year(symbol_key: str, year: int) -> str:
+    """Merge new local dailies for (symbol, year) into the yearly parquet.
+
+    1. Find local dailies for the year
+    2. Download the SPECIFIC existing yearly (one file, ~250 MiB) from MinIO if any
+    3. Determine which dailies aren't already in the yearly
+    4. If new ones exist, merge and write back; safety-check; upload that one file
+
+    No mc mirror, no full-history scan. Only this year's yearly is touched.
+
+    Returns: 'updated' | 'unchanged' | 'no-dailies' | 'failed'.
+    """
+    dst_dir = YEARLY_BASE / f"symbol={symbol_key}" / f"year={year}"
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    dst_file = dst_dir / f"{symbol_key}_{year}.parquet"
+    remote_path = f"myminio/dukascopy-node/ohlcv/1Ys/symbol={symbol_key}/year={year}/{symbol_key}_{year}.parquet"
+
+    daily_files = _list_local_dailies_for_year(symbol_key, year)
+    if not daily_files:
+        print(f"[{symbol_key}] {year}: consolidation skipped (no local dailies)")
+        return "no-dailies"
+
+    # Download the existing yearly (one specific file).
+    print(f"[{symbol_key}] {year}: fetching existing yearly from MinIO (if any)")
+    fetch = subprocess.run(
+        ["mc", "cp", remote_path, str(dst_file)],
+        capture_output=True, text=True,
+    )
+    has_existing = dst_file.exists() and dst_file.stat().st_size > 0
+    if fetch.returncode != 0 and "Object does not exist" not in (fetch.stderr or ""):
+        print(f"[{symbol_key}] {year}: WARN mc cp existing yearly failed: {fetch.stderr.strip()}")
+        # If the download outright failed (network) and a yearly truly exists remotely,
+        # writing a new one could destroy data. Abort this year's consolidation.
+        return "failed"
+    if not has_existing:
+        print(f"[{symbol_key}] {year}: no existing yearly — will create new")
+
+    # Determine existing dates so we can:
+    #   (a) filter daily files we still need to merge
+    #   (b) run the safety check against losing any
+    existing_dates: set = set()
+    if has_existing:
+        try:
+            df = (
+                pl.scan_parquet(dst_file)
+                  .select(pl.col("timestamp").cast(pl.Datetime("us", "UTC")).dt.date().alias("d"))
+                  .unique()
+                  .collect()
+            )
+            existing_dates = set(df["d"].to_list())
+        except Exception as e:
+            print(f"[{symbol_key}] {year}: WARN couldn't read existing yearly dates: {e}")
+            existing_dates = set()
+
+    # Filter dailies that aren't already in the yearly.
+    new_dailies = []
+    for f in daily_files:
+        date_str = f.parent.name.split("=")[1]
+        d = datetime.strptime(date_str, "%Y-%m-%d").date()
+        if d not in existing_dates:
+            new_dailies.append(f)
+
+    if not new_dailies:
+        print(f"[{symbol_key}] {year}: yearly already covers all {len(daily_files)} local dailies — nothing to update")
+        # Tidy up: remove the locally-downloaded yearly to avoid disk bloat across years.
+        try:
+            dst_file.unlink()
+        except OSError:
+            pass
+        return "unchanged"
+
+    print(f"[{symbol_key}] {year}: merging {len(new_dailies)} new dailies "
+          f"into yearly with {len(existing_dates)} existing day(s)")
+
+    new_data = pl.concat([
+        pl.scan_parquet(str(f)).with_columns(YEARLY_SCHEMA_CASTS) for f in new_dailies
+    ])
+    if has_existing:
+        existing_lazy = pl.scan_parquet(dst_file).with_columns(YEARLY_SCHEMA_CASTS)
+        combined = pl.concat([existing_lazy, new_data])
+    else:
+        combined = new_data
+
+    final = combined.sort("timestamp").unique().collect()
+
+    # Safety check — refuse to write if any existing date is missing from result.
+    if existing_dates:
+        final_dates = set(
+            final.select(
+                pl.col("timestamp").cast(pl.Datetime("us", "UTC")).dt.date().alias("d")
+            )["d"].to_list()
+        )
+        lost = existing_dates - final_dates
+        if lost:
+            raise RuntimeError(
+                f"[{symbol_key}] {year}: REFUSING to write yearly — would drop "
+                f"{len(lost)} existing date(s) (e.g. {sorted(lost)[:5]})."
+            )
+
+    final.write_parquet(dst_file)
+    print(f"[{symbol_key}] {year}: wrote yearly with {len(final):,} records, uploading...")
+
+    upload = subprocess.run(
+        ["mc", "cp", "--preserve", str(dst_file), remote_path],
+        capture_output=True, text=True,
+    )
+    if upload.returncode != 0:
+        print(f"[{symbol_key}] {year}: UPLOAD FAILED: {upload.stderr.strip()}")
+        return "failed"
+    print(f"[{symbol_key}] {year}: yearly uploaded ({dst_file.stat().st_size / (1024*1024):.0f} MiB)")
+    return "updated"
+
+
+# -----------------------------------------------------------------------------
 #  Year-level orchestration
 # -----------------------------------------------------------------------------
 def process_year(symbol_key: str, year: int, force: bool) -> dict:
-    """Process all 12 months of `year` for `symbol_key`. Returns counters."""
+    """Process all 12 months of `year` for `symbol_key`. Then inline-consolidate
+    the (symbol, year)'s yearly. Returns counters."""
     print(f"\n=== {symbol_key} {year} ===")
-    counters = {"settled": 0, "done": 0, "failed": 0}
+    counters = {"settled": 0, "done": 0, "failed": 0, "consolidation": "skipped"}
     for month in range(1, 13):
         result = process_month(symbol_key, year, month, force)
         counters[result] += 1
+
+    # Only attempt consolidation if at least one month produced new data this run,
+    # OR if force was used (where the user explicitly wants a re-merge regardless).
+    if counters["done"] > 0 or force:
+        try:
+            counters["consolidation"] = consolidate_year(symbol_key, year)
+        except Exception as e:
+            print(f"[{symbol_key}] {year}: consolidation FAILED: {e!r}")
+            counters["consolidation"] = "failed"
+    else:
+        counters["consolidation"] = "skipped-no-changes"
     return counters
 
 
@@ -287,13 +446,14 @@ def main():
     any_failed = False
     for sym, years in summary.items():
         for yr, counts in years.items():
-            print(f"  {sym} {yr}: settled={counts['settled']} done={counts['done']} failed={counts['failed']}")
-            if counts["failed"]:
+            print(f"  {sym} {yr}: settled={counts['settled']} done={counts['done']} "
+                  f"failed={counts['failed']} consolidation={counts['consolidation']}")
+            if counts["failed"] or counts["consolidation"] == "failed":
                 any_failed = True
     print("=" * 60)
     if any_failed:
-        raise SystemExit("Some months failed — see logs above and re-run with the same args, "
-                         "or retry specific dates with backfill_missing.py")
+        raise SystemExit("Some months or consolidations failed — see logs above and re-run "
+                         "with the same args, or retry specific dates with backfill_missing.py")
 
 
 if __name__ == "__main__":
