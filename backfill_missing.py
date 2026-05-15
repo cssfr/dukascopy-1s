@@ -80,11 +80,22 @@ def run_dukascopy(symbol_id: str, date_str: str):
 
 
 def _exists_in_minio(symbol_key: str, date_str: str) -> bool:
+    """True iff the daily PARQUET (not just a status JSON) is in MinIO.
+
+    Previously this checked whether the date= directory had any content,
+    which spuriously matched directories containing only a `_status.json`
+    from a previous FAILED attempt — causing retries to be silently skipped
+    with "Already in MinIO".
+    """
+    parquet_path = (
+        f"myminio/dukascopy-node/ohlcv/1s/symbol={symbol_key}"
+        f"/date={date_str}/{symbol_key}_{date_str}.parquet"
+    )
     result = subprocess.run(
-        ["mc", "ls", f"myminio/dukascopy-node/ohlcv/1s/symbol={symbol_key}/date={date_str}/"],
+        ["mc", "stat", parquet_path],
         capture_output=True, text=True
     )
-    return result.returncode == 0 and bool(result.stdout.strip())
+    return result.returncode == 0
 
 
 def list_parquet_dates_remote(symbol_key: str):

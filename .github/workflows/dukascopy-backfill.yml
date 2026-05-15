@@ -70,10 +70,36 @@ jobs:
             echo "No files to upload"
           fi
 
-      - name: Trigger year consolidation
+      - name: Trigger current-year consolidation
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh workflow run dukascopy-year.yml \
             --repo ${{ github.repository }} \
             --ref ${{ github.ref_name }}
+
+      - name: Trigger historical consolidation
+        # Backfills may touch any year. dukascopy-year.yml only processes
+        # CURRENT_YEAR, so we also fire the historical workflow so 2021-PY
+        # yearlies get any backfilled days merged in. Idempotent / no-op
+        # when no historical dailies have changed.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${{ inputs.symbols }}" ]]; then
+            # Historical workflow accepts a single symbol; if the user passed
+            # multiple comma-separated, fire one dispatch per symbol.
+            IFS=',' read -ra SYMS <<< "${{ inputs.symbols }}"
+            for SYMBOL in "${SYMS[@]}"; do
+              gh workflow run historical_consolidation_workflow.yml \
+                --repo ${{ github.repository }} \
+                --ref ${{ github.ref_name }} \
+                -f symbol="$SYMBOL"
+            done
+          else
+            # Empty input → historical script iterates all symbols itself.
+            gh workflow run historical_consolidation_workflow.yml \
+              --repo ${{ github.repository }} \
+              --ref ${{ github.ref_name }}
+          fi
