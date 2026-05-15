@@ -45,38 +45,35 @@ jobs:
           echo "[INFO] mc installed: $($MC_PATH --version)"
           mc alias set myminio "$MINIO_ENDPOINT" "$MINIO_KEY" "$MINIO_SECRET"
 
-      - name: Run daily_ingest.py (dynamic per-symbol range)
+      - name: Sync status JSONs from MinIO
+        # daily_ingest.py reads `_status.json` files locally to:
+        #   1. compute latest_attempted_date() (sets the forward-sweep start)
+        #   2. find recent FAILED days to retry
+        # Pull just the JSON markers (parquet bodies stay remote — ~KB vs GB).
         run: |
-          SYMS=$(yq 'keys | .[]' symbols.yaml | tr -d '"')
-          for SYMBOL in $SYMS; do
-            LAST_DIR=$(mc ls --json myminio/dukascopy-node/ohlcv/1s/symbol=$SYMBOL/ \
-              | jq -r 'select(.key | test("date=.*/$")) | .key' \
-              | sort | tail -n1)
-            if [[ -n "$LAST_DIR" ]]; then
-              DATE=${LAST_DIR##*date=}
-              DATE=${DATE%/}
-              PARQUET_FILE="myminio/dukascopy-node/ohlcv/1s/symbol=$SYMBOL/date=$DATE/${SYMBOL}_${DATE}.parquet"
-              if mc stat "$PARQUET_FILE" >/dev/null 2>&1; then
-                NEXT_DATE=$(python -c "from datetime import date, timedelta; d = date.fromisoformat('$DATE'); print(d + timedelta(days=1))")
-                echo "[INFO] Ingesting $SYMBOL from $NEXT_DATE (last file: $DATE)"
-                python daily_ingest.py --symbols $SYMBOL --from $NEXT_DATE
-              else
-                echo "[WARNING] Date directory exists but parquet file missing for $SYMBOL on $DATE"
-                python daily_ingest.py --symbols $SYMBOL
-              fi
-            else
-              echo "[INFO] No date directories found for $SYMBOL"
-              python daily_ingest.py --symbols $SYMBOL
-            fi
-          done
+          set -euo pipefail
+          mkdir -p ohlcv/1s
+          mc mirror --exclude "*.parquet" --overwrite \
+            myminio/dukascopy-node/ohlcv/1s/ ohlcv/1s/
 
-      - name: Sync new daily parquets to MinIO
+      - name: Run daily_ingest.py
+        # No --from override needed: the script computes the start date from
+        # the synced status JSONs, and runs retry_failed_days() over the last
+        # 30 days of FAILED markers before the forward sweep.
         run: |
-          if [ -d ohlcv/1s ] && [ "$(find ohlcv/1s -name '*.parquet' 2>/dev/null | wc -l)" -gt 0 ]; then
-            echo "Found parquet files to sync"
+          set -euo pipefail
+          python daily_ingest.py
+
+      - name: Sync output back to MinIO
+        # Mirror unconditionally — Saturday runs may produce only EMPTY
+        # status JSONs (no parquets), and those markers must still reach
+        # MinIO so they're visible to the next run.
+        run: |
+          set -euo pipefail
+          if [ -d ohlcv/1s ]; then
             mc mirror --overwrite ohlcv/1s/ myminio/dukascopy-node/ohlcv/1s/
           else
-            echo "No new parquet files to sync - all symbols up-to-date"
+            echo "No ohlcv/1s directory — nothing to sync"
           fi
 
   workflow-keepalive:
