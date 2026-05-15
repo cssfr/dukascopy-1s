@@ -26,26 +26,47 @@ jobs:
       
       - name: Install tools and dependencies
         run: |
+          set -euo pipefail
           pip install polars pyarrow pyyaml
-          curl -s https://dl.min.io/client/mc/release/linux-amd64/mc \
-               -o /usr/local/bin/mc && chmod +x /usr/local/bin/mc
+
+          # Robust mc install: GitHub releases primary, dl.min.io fallback, validation.
+          # Matches the install used in dukascopy-backfill.yml — silent curl with
+          # no validation has corrupted the binary in past runs (mc binary turned
+          # into an HTML error page, exec'd as shell, "line 1: a: No such file").
+          MC_PATH=/usr/local/bin/mc
+          MC_VERSION=$(curl -fsSL https://api.github.com/repos/minio/mc/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
+          if curl -fsSL "https://github.com/minio/mc/releases/download/${MC_VERSION}/mc.linux-amd64" -o "$MC_PATH"; then
+            echo "mc installed from GitHub releases (${MC_VERSION})"
+          else
+            echo "[WARN] GitHub releases failed, trying dl.min.io fallback"
+            curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o "$MC_PATH"
+          fi
+          chmod +x "$MC_PATH"
+
+          if ! "$MC_PATH" --version >/dev/null 2>&1 ; then
+            echo "[ERROR] mc binary invalid or not executable. Dumping first 200 bytes:"
+            head -c 200 "$MC_PATH" || true
+            exit 1
+          fi
+          echo "[INFO] mc installed: $($MC_PATH --version)"
+
           mc alias set myminio "$MINIO_ENDPOINT" "$MINIO_KEY" "$MINIO_SECRET"
-      
+
       - name: Run historical yearly consolidation
         run: |
-          echo "Starting historical consolidation..."
-          
-          # Build command
-          CMD="python historical_consolidation_script.py --symbol NIKKEI"
-          
-          # Add symbol filter if specified
+          set -euo pipefail
+          # Pass --symbol only when explicitly provided. With no input, the
+          # script iterates all symbols in symbols.yaml. (Previously this had
+          # a hardcoded `--symbol NIKKEI` default that contradicted the
+          # workflow_dispatch input description.)
           if [ -n "${{ github.event.inputs.symbol }}" ]; then
-            CMD="$CMD --symbol ${{ github.event.inputs.symbol }}"
+            CMD="python historical_consolidation_script.py --symbol ${{ github.event.inputs.symbol }}"
+          else
+            CMD="python historical_consolidation_script.py"
           fi
-          
+
           echo "Executing: $CMD"
           $CMD
-          
           echo "Historical consolidation completed"
       
       - name: Upload consolidated yearly files to MinIO
