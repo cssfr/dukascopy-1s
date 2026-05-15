@@ -49,6 +49,12 @@ SYMBOLS_FILE = Path("symbols.yaml")
 # in ~5-8 minutes locally; allow 30 min in case CI network is slow.
 MONTH_TIMEOUT_SEC = 1800
 
+# Retries for transient dukascopy-node "fetch failed" errors (CDN hiccups,
+# DNS, transient 5xx). Different from the across-runs retry sweep — these
+# happen within a single workflow run.
+MONTH_MAX_RETRIES = 3
+MONTH_RETRY_DELAY_SEC = 60
+
 if not SYMBOLS_FILE.exists():
     raise SystemExit("symbols.yaml not found.")
 SYMBOLS = yaml.safe_load(SYMBOLS_FILE.read_text())
@@ -98,16 +104,53 @@ def max_attempt_in_month(symbol_key: str, year: int, month: int) -> int:
 #  Dukascopy month download
 # -----------------------------------------------------------------------------
 def run_dukascopy_month(symbol_id: str, year: int, month: int) -> Path:
-    """Download one full month of 1s data as a single CSV. Returns the CSV path."""
+    """Download one full month of 1s data as a single CSV. Retries on transient
+    `fetch failed` errors from dukascopy-node (CDN / DNS / transient 5xx) up to
+    MONTH_MAX_RETRIES with MONTH_RETRY_DELAY_SEC sleep between attempts."""
     from_str, to_str = month_bounds(year, month)
     cmd = (
         f"npx dukascopy-node -i {symbol_id} -from {from_str} -to {to_str} "
         f'-t s1 -f csv --date-format "YYYY-MM-DD HH:mm:ss" -v -fl'
     )
-    print(f"Running: {cmd}")
-    subprocess.run(cmd, check=True, shell=True, timeout=MONTH_TIMEOUT_SEC)
     csv_name = f"{symbol_id}-s1-bid-{from_str}-{to_str}.csv"
-    return DOWNLOAD_DIR / csv_name
+    csv_path = DOWNLOAD_DIR / csv_name
+
+    last_exc: Exception | None = None
+    for attempt in range(1, MONTH_MAX_RETRIES + 1):
+        # Clear any partial CSV from a previous attempt so we can tell if
+        # this attempt actually wrote one.
+        csv_path.unlink(missing_ok=True)
+
+        print(f"Running (attempt {attempt}/{MONTH_MAX_RETRIES}): {cmd}")
+        try:
+            subprocess.run(cmd, check=True, shell=True, timeout=MONTH_TIMEOUT_SEC)
+            if csv_path.exists():
+                return csv_path
+            # dukascopy-node sometimes exits 0 on "fetch failed" (logs the
+            # error to stdout but doesn't propagate via exit code). Treat
+            # missing CSV as a transient failure and retry.
+            print(f"[WARN] dukascopy-node exited 0 but CSV not written "
+                  f"(attempt {attempt}/{MONTH_MAX_RETRIES}) — treating as transient failure")
+            last_exc = RuntimeError("dukascopy-node produced no CSV (likely fetch failed)")
+        except subprocess.CalledProcessError as e:
+            last_exc = e
+            print(f"[WARN] dukascopy-node exit {e.returncode} "
+                  f"(attempt {attempt}/{MONTH_MAX_RETRIES})")
+        except subprocess.TimeoutExpired:
+            # Real timeout, not a transient fetch hiccup. Let it bubble up.
+            raise
+
+        if attempt < MONTH_MAX_RETRIES:
+            print(f"  retrying in {MONTH_RETRY_DELAY_SEC}s")
+            time.sleep(MONTH_RETRY_DELAY_SEC)
+
+    # All retries exhausted.
+    print(f"[ERROR] dukascopy-node failed all {MONTH_MAX_RETRIES} attempts: {last_exc!r}")
+    if isinstance(last_exc, subprocess.CalledProcessError):
+        raise last_exc
+    raise subprocess.CalledProcessError(
+        returncode=1, cmd=cmd, output=str(last_exc)
+    )
 
 
 # -----------------------------------------------------------------------------
