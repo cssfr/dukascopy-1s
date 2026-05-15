@@ -10,6 +10,11 @@ import pandas as pd
 import json
 import numpy as np
 
+from ingest_status import (
+    STATUS_INGESTED, STATUS_EMPTY, STATUS_FAILED,
+    write_status,
+)
+
 OUTPUT_DIR = Path("ohlcv/1s")
 DOWNLOAD_DIR = Path("download")
 SYMBOLS_FILE = Path("symbols.yaml")
@@ -106,6 +111,9 @@ def _download_one_day(symbol_key: str, dukas_id: str, current: date):
     Returns True if parquet was created.
     Returns False if the day has no data (weekend/holiday) — not a failure.
     Raises DownloadError if all retries exhausted on what looks like a real trading day.
+
+    Every outcome writes a `_status.json` next to the parquet path
+    (INGESTED | EMPTY | FAILED) so the daily ingest can see it.
     """
     date_str = current.strftime("%Y-%m-%d")
     next_day_str = (current + timedelta(days=1)).strftime("%Y-%m-%d")
@@ -117,6 +125,7 @@ def _download_one_day(symbol_key: str, dukas_id: str, current: date):
         return True
 
     last_exc = None
+    start = time.monotonic()
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             run_dukascopy(dukas_id, date_str)
@@ -128,6 +137,9 @@ def _download_one_day(symbol_key: str, dukas_id: str, current: date):
                 continue
             else:
                 print(f"[{symbol_key}] ✗ {date_str} — all {MAX_RETRIES} attempts failed: {e}")
+                write_status(OUTPUT_DIR, symbol_key, date_str, STATUS_FAILED,
+                             error=str(e), attempt=attempt,
+                             duration_ms=int((time.monotonic() - start) * 1000))
                 raise DownloadError(str(e)) from e
 
         csv_name = f"{dukas_id}-s1-bid-{date_str}-{next_day_str}.csv"
@@ -136,6 +148,9 @@ def _download_one_day(symbol_key: str, dukas_id: str, current: date):
         if not csv_path.exists() or csv_path.stat().st_size == 0:
             csv_path.unlink(missing_ok=True)
             print(f"[{symbol_key}] ⚠ {date_str} — no data (holiday/weekend/unavailable)")
+            write_status(OUTPUT_DIR, symbol_key, date_str, STATUS_EMPTY,
+                         attempt=attempt,
+                         duration_ms=int((time.monotonic() - start) * 1000))
             return False
 
         parquet_path.parent.mkdir(parents=True, exist_ok=True)
@@ -144,9 +159,20 @@ def _download_one_day(symbol_key: str, dukas_id: str, current: date):
         except NoDataError:
             csv_path.unlink(missing_ok=True)
             print(f"[{symbol_key}] ⚠ {date_str} — no data rows (holiday/weekend/unavailable)")
+            write_status(OUTPUT_DIR, symbol_key, date_str, STATUS_EMPTY,
+                         attempt=attempt,
+                         duration_ms=int((time.monotonic() - start) * 1000))
             return False
 
         csv_path.unlink(missing_ok=True)
+        # Count rows in the parquet we just wrote (cheap)
+        try:
+            row_count = len(pd.read_parquet(parquet_path, columns=['symbol']))
+        except Exception:
+            row_count = 0
+        write_status(OUTPUT_DIR, symbol_key, date_str, STATUS_INGESTED,
+                     row_count=row_count, attempt=attempt,
+                     duration_ms=int((time.monotonic() - start) * 1000))
         print(f"[{symbol_key}] ✔ {date_str}")
         return True
 
