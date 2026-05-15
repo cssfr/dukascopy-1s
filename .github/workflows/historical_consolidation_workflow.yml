@@ -50,7 +50,20 @@ jobs:
           fi
           echo "[INFO] mc installed: $($MC_PATH --version)"
 
-          mc alias set myminio "$MINIO_ENDPOINT" "$MINIO_KEY" "$MINIO_SECRET"
+          # Retry mc alias set - endpoint DNS (sslip.io) and MinIO probe can hiccup;
+          # the alias setup includes a credential probe that fails on transient lookup timeouts.
+          for i in 1 2 3 4 5; do
+            if mc alias set myminio "$MINIO_ENDPOINT" "$MINIO_KEY" "$MINIO_SECRET"; then
+              echo "[INFO] mc alias set succeeded (attempt $i)"
+              break
+            fi
+            if [ $i -eq 5 ]; then
+              echo "[ERROR] mc alias set failed after 5 attempts"
+              exit 1
+            fi
+            echo "[WARN] mc alias set failed (attempt $i/5), retrying in 30s"
+            sleep 30
+          done
           apt-get install -y jq || sudo apt-get install -y jq || true
 
       - name: Download existing yearlies from MinIO
