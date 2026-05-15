@@ -7,6 +7,7 @@ Designed to be run manually once for backfilled historical data.
 """
 
 import os
+import json
 import polars as pl
 import subprocess
 import argparse
@@ -23,173 +24,146 @@ CURRENT_YEAR = datetime.now().year
 PREVIOUS_YEAR = CURRENT_YEAR - 1  # 2024
 # ─────────────────────────────────────────────────────────────────
 
-def build_date_pattern(start_date: date, end_date: date) -> str:
-    """Build MinIO include pattern for date range"""
-    if start_date.year != end_date.year:
-        # Handle year boundary - for now just use full year pattern
-        return f"{start_date.year}-*"
-    
-    if start_date.month == end_date.month:
-        # Same month - can be more specific
-        if start_date.day == 1 and end_date.day >= 28:
-            # Full month
-            return f"{start_date.year}-{start_date.month:02d}-*"
-        else:
-            # Partial month - use broader pattern to be safe
-            return f"{start_date.year}-{start_date.month:02d}-*"
-    else:
-        # Multiple months - use year pattern
-        return f"{start_date.year}-*"
+def get_dates_in_yearly(yearly_file_path: Path) -> set[date]:
+    """Return the set of UTC dates already represented in the yearly parquet.
+
+    Replaces the old `last_consolidated_date` watermark, which silently
+    skipped backfilled days that fell before the yearly's max timestamp.
+    """
+    if not yearly_file_path.exists():
+        return set()
+    try:
+        df = (
+            pl.scan_parquet(yearly_file_path)
+              .select(
+                  pl.col("timestamp").cast(pl.Datetime("us", "UTC")).dt.date().alias("d")
+              )
+              .unique()
+              .collect()
+        )
+        return set(df["d"].to_list())
+    except Exception as e:
+        print(f"Warning: Could not read dates from {yearly_file_path}: {e}")
+        return set()
+
+
+def list_minio_dailies_for_symbol_year(symbol: str, target_year: int) -> set[date]:
+    """List all daily parquet dates that exist for `symbol`, `target_year` in MinIO."""
+    try:
+        proc = subprocess.run(
+            ["mc", "ls", "--json", f"myminio/dukascopy-node/ohlcv/1s/symbol={symbol}/"],
+            capture_output=True, text=True, check=False,
+        )
+    except Exception as e:
+        print(f"[{symbol}] Warning: mc ls failed: {e}")
+        return set()
+    if proc.returncode != 0:
+        return set()
+
+    dates: set[date] = set()
+    for line in proc.stdout.splitlines():
+        try:
+            obj = json.loads(line)
+            key = obj.get("key", "")
+            if "date=" in key and key.endswith("/"):
+                date_str = key.split("date=")[1].rstrip("/")
+                d = datetime.strptime(date_str, "%Y-%m-%d").date()
+                if d.year == target_year:
+                    dates.add(d)
+        except (ValueError, json.JSONDecodeError):
+            continue
+    return dates
+
 
 def smart_download_for_symbol(symbol: str, target_year: int) -> None:
-    """Smart download: read yearly file, determine needed range, download only required daily files"""
-    
-    # Setup paths
+    """Download every daily parquet present in MinIO whose date is missing
+    from the existing yearly. Picks up backfilled historical days correctly,
+    unlike the old `last_consolidated_date` watermark."""
+
     dst_dir = DST_BASE / f"symbol={symbol}" / f"year={target_year}"
     dst_file = dst_dir / f"{symbol}_{target_year}.parquet"
-    
-    # Get last consolidated date
-    last_consolidated_date = get_last_consolidated_date(dst_file)
-    
-    # Calculate date range to download - SAME LOGIC AS ORIGINAL
-    if last_consolidated_date:
-        start_date = last_consolidated_date + timedelta(days=1)
-        print(f"[{symbol}] Last consolidated: {last_consolidated_date}, downloading from {start_date}")
-    else:
-        start_date = date(target_year, 1, 1)  # Use target_year instead of CURRENT_YEAR
-        print(f"[{symbol}] No yearly file found, downloading entire {target_year}")
-    
-    # Don't download future dates - SAME LOGIC AS ORIGINAL
-    end_date = min(date.today(), date(target_year, 12, 31))  # Use target_year instead of CURRENT_YEAR
-    
-    if start_date > end_date:
-        print(f"[{symbol}] Already up-to-date (last: {last_consolidated_date})")
+
+    dates_in_yearly  = get_dates_in_yearly(dst_file)
+    dailies_in_minio = list_minio_dailies_for_symbol_year(symbol, target_year)
+
+    # Don't try to pull future dates.
+    cutoff = min(date.today(), date(target_year, 12, 31))
+    missing = sorted(d for d in (dailies_in_minio - dates_in_yearly) if d <= cutoff)
+
+    if not missing:
+        print(f"[{symbol}] {target_year}: yearly already covers every daily in MinIO ({len(dates_in_yearly)} days)")
         return
-    
-    # Build smart date pattern
-    date_pattern = build_date_pattern(start_date, end_date)
-    include_pattern = f"symbol={symbol}/date={date_pattern}/*"
-    
-    print(f"[{symbol}] Downloading pattern: {include_pattern}")
-    
-    # Execute smart download - IDENTICAL LOGIC AS ORIGINAL
-    try:
-        cmd = [
-            "mc", "mirror",
-            "--exclude", "*",
-            "myminio/dukascopy-node/ohlcv/1s/",
-            "ohlcv/1s/"
-        ]
-        
-        # Add specific include pattern using multiple excludes (workaround)
-        # Since mc doesn't support --include, we'll use mc cp with specific paths
-        
-        # Alternative approach: use mc cp for specific date ranges
-        print(f"[{symbol}] Using mc cp for specific date range: {date_pattern}")
-        
-        # Calculate specific dates to copy
-        current_date = start_date
-        files_copied = 0
-        
-        while current_date <= end_date:
-            date_str = current_date.strftime("%Y-%m-%d")
-            src_path = f"myminio/dukascopy-node/ohlcv/1s/symbol={symbol}/date={date_str}/{symbol}_{date_str}.parquet"
-            dst_dir = f"ohlcv/1s/symbol={symbol}/date={date_str}"
-            
-            # Check if file exists and copy it
-            check_cmd = ["mc", "stat", src_path]
-            check_result = subprocess.run(check_cmd, capture_output=True, text=True, check=False)
-            
-            if check_result.returncode == 0:
-                # File exists, copy it
-                subprocess.run(["mkdir", "-p", dst_dir], check=False)
-                copy_cmd = ["mc", "cp", src_path, f"{dst_dir}/"]
-                copy_result = subprocess.run(copy_cmd, capture_output=True, text=True, check=False)
-                if copy_result.returncode == 0:
-                    files_copied += 1
-                    print(f"[{symbol}] ✓ Downloaded {date_str}")
-                else:
-                    print(f"[{symbol}] ⚠️  Failed to copy {date_str}: {copy_result.stderr}")
-            
-            current_date += timedelta(days=1)
-        
-        print(f"[{symbol}] ✅ Smart download completed: {files_copied} files copied")
-            
-    except Exception as e:
-        print(f"[{symbol}] ❌ Download error: {str(e)}")
 
-def get_last_consolidated_date(yearly_file_path: Path) -> date | None:
-    """Get the last date from existing yearly file"""
-    try:
-        if not yearly_file_path.exists():
-            return None
-        
-        # Read just the timestamp column to find the latest date
-        df = pl.scan_parquet(yearly_file_path).select("timestamp").collect()
-        if df.is_empty():
-            return None
-            
-        # Get the latest timestamp and convert to date
-        latest_ts = df["timestamp"].max()
-        return latest_ts.date() if latest_ts else None
-        
-    except Exception as e:
-        print(f"Warning: Could not read last date from {yearly_file_path}: {e}")
-        return None
+    print(
+        f"[{symbol}] {target_year}: yearly has {len(dates_in_yearly)} days, "
+        f"MinIO has {len(dailies_in_minio)} dailies → "
+        f"{len(missing)} day(s) need merging"
+    )
 
-def get_daily_files_to_process(symbol: str, target_year: int, start_date: date | None = None) -> list[Path]:
-    """Get list of daily files that need to be processed for this symbol"""
+    files_copied = 0
+    for d in missing:
+        date_str = d.strftime("%Y-%m-%d")
+        src_path = f"myminio/dukascopy-node/ohlcv/1s/symbol={symbol}/date={date_str}/{symbol}_{date_str}.parquet"
+        dst_subdir = f"ohlcv/1s/symbol={symbol}/date={date_str}"
+        subprocess.run(["mkdir", "-p", dst_subdir], check=False)
+        copy_result = subprocess.run(
+            ["mc", "cp", src_path, f"{dst_subdir}/"],
+            capture_output=True, text=True, check=False,
+        )
+        if copy_result.returncode == 0:
+            files_copied += 1
+            print(f"[{symbol}] ✓ Downloaded {date_str}")
+        else:
+            print(f"[{symbol}] ⚠ {date_str}: no parquet at source ({copy_result.stderr.strip()})")
+
+    print(f"[{symbol}] ✅ Smart download completed: {files_copied}/{len(missing)} files copied")
+
+
+def get_daily_files_to_process(symbol: str, target_year: int, skip_dates: set[date]) -> list[Path]:
+    """List local daily parquets for `symbol`/`target_year` whose date is NOT in skip_dates."""
     symbol_dir = SRC_BASE / f"symbol={symbol}"
     if not symbol_dir.exists():
         return []
-    
-    daily_files = []
-    
-    # Get all date directories for target year - SAME PATTERN AS ORIGINAL
-    for date_dir in symbol_dir.glob(f"date={target_year}-*"):  # Use target_year instead of CURRENT_YEAR
+
+    daily_files: list[Path] = []
+    for date_dir in symbol_dir.glob(f"date={target_year}-*"):
         if not date_dir.is_dir():
             continue
-            
         try:
-            # Extract date from directory name
             date_str = date_dir.name.split("=")[1]
             file_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-            
-            # Only include files after start_date - SAME LOGIC AS ORIGINAL
-            if start_date is None or file_date > start_date:
-                expected_file = date_dir / f"{symbol}_{date_str}.parquet"
-                if expected_file.exists():
-                    daily_files.append(expected_file)
-                    
         except ValueError:
             continue
-    
+
+        if file_date in skip_dates:
+            continue
+        expected_file = date_dir / f"{symbol}_{date_str}.parquet"
+        if expected_file.exists():
+            daily_files.append(expected_file)
+
     return sorted(daily_files)
+
 
 def process_symbol_year(symbol: str, target_year: int) -> None:
     """Consolidate daily files into yearly file for given symbol"""
-    
-    # Setup paths
+
     dst_dir = DST_BASE / f"symbol={symbol}" / f"year={target_year}"
     dst_file = dst_dir / f"{symbol}_{target_year}.parquet"
     dst_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Check existing yearly file
-    last_consolidated_date = get_last_consolidated_date(dst_file)
-    
-    # Get daily files that need processing
-    daily_files = get_daily_files_to_process(symbol, target_year, last_consolidated_date)
-    
+
+    dates_in_yearly = get_dates_in_yearly(dst_file)
+    daily_files     = get_daily_files_to_process(symbol, target_year, dates_in_yearly)
+
     if not daily_files:
-        if last_consolidated_date:
-            print(f"[{symbol}] No new daily files since {last_consolidated_date}")
+        if dates_in_yearly:
+            print(f"[{symbol}] {target_year}: no new daily files (yearly already covers {len(dates_in_yearly)} days)")
         else:
-            print(f"[{symbol}] No daily files found for {target_year}")
+            print(f"[{symbol}] {target_year}: no daily files found")
         return
-    
-    print(f"[{symbol}] Processing {len(daily_files)} daily files for {target_year}")
-    if last_consolidated_date:
-        print(f"[{symbol}] Incremental update from {last_consolidated_date}")
+
+    print(f"[{symbol}] {target_year}: processing {len(daily_files)} daily files")
+    if dates_in_yearly:
+        print(f"[{symbol}] Merging into yearly that already has {len(dates_in_yearly)} days")
     else:
         print(f"[{symbol}] Creating new yearly file")
     
