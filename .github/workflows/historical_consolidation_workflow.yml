@@ -51,6 +51,34 @@ jobs:
           echo "[INFO] mc installed: $($MC_PATH --version)"
 
           mc alias set myminio "$MINIO_ENDPOINT" "$MINIO_KEY" "$MINIO_SECRET"
+          apt-get install -y jq || sudo apt-get install -y jq || true
+
+      - name: Download existing yearlies from MinIO
+        # CRITICAL: without this step, the script would read an empty local
+        # ohlcv/1Ys/, conclude the yearly has 0 dates, and rebuild each
+        # yearly from only the newly-backfilled dailies — destroying the
+        # existing history when the final mc mirror overwrites MinIO.
+        # Matches the pattern from dukascopy-year.yml.
+        run: |
+          set -euo pipefail
+          mkdir -p ohlcv/1Ys
+
+          if [ -n "${{ github.event.inputs.symbol }}" ]; then
+            SYMS="${{ github.event.inputs.symbol }}"
+          else
+            SYMS=$(yq 'keys | .[]' symbols.yaml | tr -d '"')
+          fi
+
+          for SYMBOL in $SYMS; do
+            REMOTE_PREFIX="myminio/dukascopy-node/ohlcv/1Ys/symbol=$SYMBOL/"
+            if mc ls "$REMOTE_PREFIX" >/dev/null 2>&1; then
+              echo "[INFO] Downloading existing yearlies for $SYMBOL"
+              mkdir -p "ohlcv/1Ys/symbol=$SYMBOL"
+              mc mirror --overwrite "$REMOTE_PREFIX" "ohlcv/1Ys/symbol=$SYMBOL/"
+            else
+              echo "[INFO] No existing yearlies in MinIO for $SYMBOL"
+            fi
+          done
 
       - name: Run historical yearly consolidation
         run: |

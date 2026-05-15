@@ -200,15 +200,37 @@ def process_symbol_year(symbol: str, target_year: int) -> None:
         else:
             combined_df = new_data
         
-        # Sort, deduplicate and save - IDENTICAL TO ORIGINAL
+        # Sort, deduplicate and save
         print(f"[{symbol}] Sorting and deduplicating data")
         final_df = (combined_df
                    .sort('timestamp')
                    .unique()
                    .collect())
-        
+
+        # SAFETY CHECK: refuse to write a yearly that would drop existing dates.
+        # If `dates_in_yearly` was non-empty (existing yearly had data) but the
+        # final result is missing some of those dates, the workflow probably
+        # didn't sync the existing yearly from MinIO before running — bail out
+        # rather than overwriting the source-of-truth yearly with a partial one.
+        if dates_in_yearly:
+            new_dates = set(
+                final_df.select(
+                    pl.col('timestamp').cast(pl.Datetime('us', 'UTC')).dt.date().alias('d')
+                )['d'].to_list()
+            )
+            lost = dates_in_yearly - new_dates
+            if lost:
+                lost_sample = sorted(lost)[:5]
+                raise RuntimeError(
+                    f"[{symbol}] {target_year}: REFUSING to write yearly — would drop "
+                    f"{len(lost)} existing date(s) (e.g. {lost_sample}). "
+                    f"This usually means the existing yearly wasn't downloaded from MinIO "
+                    f"before running this script. Check the workflow's 'Download existing "
+                    f"yearlies from MinIO' step (or `mc cp` the yearly locally before running)."
+                )
+
         final_df.write_parquet(dst_file)
-        
+
         record_count = len(final_df)
         print(f"✅ [{symbol}] Saved {dst_file.relative_to(DST_BASE)} with {record_count:,} records")
         
