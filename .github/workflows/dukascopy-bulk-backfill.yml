@@ -1,0 +1,138 @@
+name: Dukascopy Bulk Backfill (1s)
+# Alternative high-throughput backfill: invokes dukascopy-node once per MONTH
+# (12 calls/year vs 250+/year). Use for big historical loads (year-range
+# extensions, new-symbol onboarding). For small recent gap fills, prefer
+# dukascopy-backfill.yml.
+
+on:
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: 'Comma-separated symbols e.g. NQ,ES (leave blank for all)'
+        required: false
+        default: ''
+      from_year:
+        description: 'Start year (inclusive), e.g. 2018'
+        required: true
+      to_year:
+        description: 'End year (inclusive), e.g. 2020'
+        required: true
+      force:
+        description: 'Re-download months that are already fully settled'
+        required: false
+        default: 'false'
+        type: boolean
+
+jobs:
+  bulk-backfill:
+    runs-on: ubuntu-latest
+    # Each year ≈ 1-1.5h (12 month calls × ~5-8 min each). Leave headroom for
+    # multi-year ranges and the upload/consolidation triggers.
+    timeout-minutes: 350
+    permissions:
+      actions: write
+
+    env:
+      MINIO_ENDPOINT: ${{ secrets.MINIO_ENDPOINT }}
+      MINIO_KEY:       ${{ secrets.MINIO_KEY }}
+      MINIO_SECRET:    ${{ secrets.MINIO_SECRET }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          set -euo pipefail
+          pip install pandas pyarrow pyyaml polars
+          npm install -g dukascopy-node
+
+          # Robust mc install: GitHub releases primary, dl.min.io fallback
+          MC_VERSION=$(curl -fsSL https://api.github.com/repos/minio/mc/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
+          if curl -fsSL "https://github.com/minio/mc/releases/download/${MC_VERSION}/mc.linux-amd64" -o /usr/local/bin/mc; then
+            echo "mc installed from GitHub releases (${MC_VERSION})"
+          else
+            echo "GitHub releases failed, trying dl.min.io fallback"
+            curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc
+          fi
+          chmod +x /usr/local/bin/mc
+          mc --version
+
+          # Retry mc alias set - endpoint DNS (sslip.io) and MinIO probe can hiccup.
+          for i in 1 2 3 4 5; do
+            if mc alias set myminio "$MINIO_ENDPOINT" "$MINIO_KEY" "$MINIO_SECRET"; then
+              echo "[INFO] mc alias set succeeded (attempt $i)"
+              break
+            fi
+            if [ $i -eq 5 ]; then
+              echo "[ERROR] mc alias set failed after 5 attempts"
+              exit 1
+            fi
+            echo "[WARN] mc alias set failed (attempt $i/5), retrying in 30s"
+            sleep 30
+          done
+
+      - name: Sync status JSONs from MinIO
+        # bulk_year_backfill.py reads existing _status.json files to decide
+        # which months to skip (when --force is not set). Without this sync,
+        # every month would be re-downloaded.
+        run: |
+          set -euo pipefail
+          mkdir -p ohlcv/1s
+          mc mirror --exclude "*.parquet" --overwrite \
+            myminio/dukascopy-node/ohlcv/1s/ ohlcv/1s/
+
+      - name: Run bulk_year_backfill.py
+        run: |
+          set -euo pipefail
+          ARGS="--from-year ${{ inputs.from_year }} --to-year ${{ inputs.to_year }}"
+          if [[ -n "${{ inputs.symbols }}" ]]; then
+            ARGS="$ARGS --symbols ${{ inputs.symbols }}"
+          fi
+          if [[ "${{ inputs.force }}" == "true" ]]; then
+            ARGS="$ARGS --force"
+          fi
+          echo "Executing: python bulk_year_backfill.py $ARGS"
+          python bulk_year_backfill.py $ARGS
+
+      - name: Upload backfilled data to MinIO
+        # Mirror unconditionally — months that produced only EMPTY status
+        # JSONs (no parquets, e.g. an entire month of closures) must still
+        # persist those markers so the next run's `month_is_settled` check
+        # can skip them.
+        if: always()  # upload even if the script raised on some failed months
+        run: |
+          set -euo pipefail
+          if [ -d ohlcv/1s ]; then
+            mc mirror --preserve --overwrite ohlcv/1s/ myminio/dukascopy-node/ohlcv/1s/
+          else
+            echo "No ohlcv/1s directory - nothing to sync"
+          fi
+
+      - name: Trigger current-year consolidation
+        # Idempotent / no-op if CURRENT_YEAR wasn't touched by the backfill.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run dukascopy-year.yml \
+            --repo ${{ github.repository }} \
+            --ref ${{ github.ref_name }}
+
+      - name: Trigger historical consolidation
+        # Same fan-out as dukascopy-backfill.yml.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${{ inputs.symbols }}" ]]; then
+            IFS=',' read -ra SYMS <<< "${{ inputs.symbols }}"
+            for SYMBOL in "${SYMS[@]}"; do
+              gh workflow run historical_consolidation_workflow.yml \
+                --repo ${{ github.repository }} \
+                --ref ${{ github.ref_name }} \
+                -f symbol="$SYMBOL"
+            done
+          else
+            gh workflow run historical_consolidation_workflow.yml \
+              --repo ${{ github.repository }} \
+              --ref ${{ github.ref_name }}
+          fi
