@@ -1,12 +1,12 @@
 name: Update Instruments Metadata
 on:
-  workflow_run:
-    workflows: ["Dukascopy Yearly Consolidation"]
-    types: [completed]
-    branches: [main]
-  workflow_dispatch:
-  schedule:
-    - cron: "0 6 1 * *"  # Monthly at 6 AM on the 1st (for keepalive)
+  # workflow_run:
+  #   workflows: ["Dukascopy Yearly Consolidation"]
+  #   types: [completed]
+  #   branches: [main]
+  # workflow_dispatch:
+  # schedule:
+  #   - cron: "0 6 1 * *"  # Monthly at 6 AM on the 1st (for keepalive)
 
 jobs:
   update-metadata:
