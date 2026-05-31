@@ -1,8 +1,8 @@
 name: Weekly Gap Check 1s
 
 on:
-  schedule:
-    - cron: '0 6 * * 1'  # Every Monday 06:00 UTC — after weekend, catches last week's gaps
+  # schedule:
+  #   - cron: '0 6 * * 1'  # Every Monday 06:00 UTC — after weekend, catches last week's gaps
   workflow_dispatch:
     inputs:
       lookback_days:
